@@ -2,6 +2,12 @@ name: Build APK and publish release
 
 # Builds the Android WebView wrapper against the GitHub Pages origin and
 # attaches the signed APK to the GitHub release.
+#
+# Caching (reused when inputs are unchanged):
+#   - npm store              -> actions/setup-node (cache: npm)
+#   - Gradle deps + wrapper  -> gradle/actions/setup-gradle
+#   - Android NDK + CMake    -> actions/cache on the exact SDK package dirs
+#   - Native CMake/Ninja objs-> actions/cache on mobile/android/app/.cxx
 
 on:
   release:
@@ -19,6 +25,9 @@ permissions:
 concurrency:
   group: android-release-${{ github.event.release.tag_name || github.event.inputs.tag || github.ref }}
   cancel-in-progress: false
+
+env:
+  CMAKE_VERSION: "3.22.1"
 
 jobs:
   build:
@@ -43,21 +52,57 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Install NDK and CMake
+      - name: Detect NDK version
         id: ndk
         working-directory: mobile/android
         run: |
           set -euo pipefail
-          NDK_VERSION="$(./gradlew -q :app:printNdkVersion 2>/dev/null | sed -n 's/^NDK_VERSION=//p' | tail -1 || true)"
-          NDK_VERSION="${NDK_VERSION:-27.1.12297006}"
-          echo "Using NDK $NDK_VERSION"
+          echo "ANDROID_SDK_ROOT=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          NDK_OUTPUT="$(./gradlew -q --console=plain :app:printNdkVersion 2>&1 || true)"
+          NDK_VERSION="$(printf '%s\n' "$NDK_OUTPUT" | sed -n 's/^NDK_VERSION=//p' | tail -1)"
+          if [ -z "$NDK_VERSION" ]; then
+            printf '%s\n' "$NDK_OUTPUT" | tail -40
+            echo "::warning::Could not detect the NDK version from Gradle; falling back to 27.1.12297006"
+            NDK_VERSION="27.1.12297006"
+          fi
           echo "ndk_version=$NDK_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected NDK ${NDK_VERSION}"
+
+      - name: Restore Android NDK/CMake cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ steps.ndk.outputs.ndk_version }}
+            ${{ env.ANDROID_SDK_ROOT }}/cmake/${{ env.CMAKE_VERSION }}
+          key: android-sdk-${{ runner.os }}-ndk-${{ steps.ndk.outputs.ndk_version }}-cmake-${{ env.CMAKE_VERSION }}
+
+      - name: Restore native (CMake/Ninja) build cache
+        uses: actions/cache@v4
+        with:
+          path: mobile/android/app/.cxx
+          key: android-cxx-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle', 'mobile/android/**/*.kt', 'mobile/android/**/*.cpp', 'mobile/android/gradle.properties', 'mobile/app.json', 'mobile/package.json', 'mobile/package-lock.json') }}
+          restore-keys: |
+            android-cxx-${{ runner.os }}-
+
+      - name: Install NDK and CMake
+        working-directory: mobile/android
+        env:
+          NDK_VERSION: ${{ steps.ndk.outputs.ndk_version }}
+        run: |
+          set -euo pipefail
+          if [ -d "${ANDROID_HOME}/ndk/${NDK_VERSION}" ] && [ -d "${ANDROID_HOME}/cmake/${CMAKE_VERSION}" ]; then
+            echo "NDK ${NDK_VERSION} and CMake ${CMAKE_VERSION} already present (image or cache) — skipping install"
+            exit 0
+          fi
           SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
           if [ ! -x "$SDKMANAGER" ]; then
             SDKMANAGER="$(find "${ANDROID_HOME}" -name sdkmanager -type f 2>/dev/null | head -1)"
           fi
-          yes | "$SDKMANAGER" --licenses > /dev/null || true
-          yes | "$SDKMANAGER" "ndk;$NDK_VERSION" "cmake;3.22.1" > /dev/null
+          echo "Using sdkmanager: ${SDKMANAGER}"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}"
+          test -d "${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          test -d "${ANDROID_HOME}/cmake/${CMAKE_VERSION}"
 
       - name: Configure release signing
         env:
@@ -104,7 +149,7 @@ jobs:
           CI: "true"
           EXPO_NO_TELEMETRY: "1"
         run: |
-          ./gradlew assembleRelease \
+          ./gradlew assembleRelease --stacktrace \
             -PappVersionName="${{ steps.version.outputs.version_name }}" \
             -PappVersionCode="${{ steps.version.outputs.version_code }}"
 
