@@ -149,7 +149,7 @@ jobs:
           CI: "true"
           EXPO_NO_TELEMETRY: "1"
         run: |
-          ./gradlew assembleRelease --stacktrace \
+          ./gradlew assembleRelease --stacktrace --build-cache \
             -PappVersionName="${{ steps.version.outputs.version_name }}" \
             -PappVersionCode="${{ steps.version.outputs.version_code }}"
 
