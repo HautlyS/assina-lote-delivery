@@ -76,11 +76,22 @@ jobs:
             ${{ env.ANDROID_SDK_ROOT }}/cmake/${{ env.CMAKE_VERSION }}
           key: android-sdk-${{ runner.os }}-ndk-${{ steps.ndk.outputs.ndk_version }}-cmake-${{ env.CMAKE_VERSION }}
 
+      - name: Compute native cache key
+        id: nativekey
+        run: |
+          set -euo pipefail
+          # Hash of the tracked native inputs only (git-tracked files), so the
+          # key never drifts when Gradle/CMake drop generated files on disk.
+          KEY="$(git ls-files -z -- 'mobile/android' 'mobile/app.json' 'mobile/package.json' 'mobile/package-lock.json' \
+            | xargs -0 sha256sum | sha256sum | cut -c1-64)"
+          echo "key=android-cxx-${RUNNER_OS}-${KEY}" >> "$GITHUB_OUTPUT"
+          echo "Native cache key: android-cxx-${RUNNER_OS}-${KEY}"
+
       - name: Restore native (CMake/Ninja) build cache
         uses: actions/cache@v4
         with:
           path: mobile/android/app/.cxx
-          key: android-cxx-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle', 'mobile/android/**/*.kt', 'mobile/android/**/*.cpp', 'mobile/android/gradle.properties', 'mobile/app.json', 'mobile/package.json', 'mobile/package-lock.json') }}
+          key: ${{ steps.nativekey.outputs.key }}
           restore-keys: |
             android-cxx-${{ runner.os }}-
 
