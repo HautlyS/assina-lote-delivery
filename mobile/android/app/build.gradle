@@ -94,8 +94,8 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         // Overridable from CI (-PappVersionName/-PappVersionCode) so every
         // published release carries its own version.
-        versionCode (findProperty("appVersionCode") ?: 1) as int
-        versionName (findProperty("appVersionName") ?: "1.0.0") as String
+        versionCode((findProperty("appVersionCode") ?: "1") as int)
+        versionName((findProperty("appVersionName") ?: "1.0.0") as String)
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }
