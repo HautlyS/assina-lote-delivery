@@ -1,0 +1,61 @@
+name: Deploy site to GitHub Pages
+
+# Builds the static front end and publishes it as the app origin.
+# The Android WebView loads this origin (see mobile/App.tsx).
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: site
+        run: pnpm install --frozen-lockfile
+
+      - name: Build static site
+        working-directory: site
+        env:
+          BASE_PATH: /${{ github.event.repository.name }}/
+        run: pnpm run build
+
+      - name: Add SPA fallback (404.html)
+        run: cp site/dist/public/index.html site/dist/public/404.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+*.log
+*.tsbuildinfo
+
+# Android build artifacts
+.gradle/
+.cxx/
+local.properties
+keystore.properties
+release.keystore
+*.release.jks
+
+# Expo / Metro
+.expo/
+.kotlin/
+
+# Packaged binaries (CI builds and attaches these to releases)
+*.apk
+*.aab
+
+# Local secrets / environment
+.env
+.env.local
+.project-config.json
+.manus-logs/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

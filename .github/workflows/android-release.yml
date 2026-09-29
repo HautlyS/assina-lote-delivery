@@ -1,0 +1,144 @@
+name: Build APK and publish release
+
+# Builds the Android WebView wrapper against the GitHub Pages origin and
+# attaches the signed APK to the GitHub release.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build for (defaults to the version in mobile/package.json)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.event.release.tag_name || github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install JS dependencies
+        working-directory: mobile
+        run: npm ci
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install NDK and CMake
+        id: ndk
+        working-directory: mobile/android
+        run: |
+          set -euo pipefail
+          NDK_VERSION="$(./gradlew -q :app:printNdkVersion 2>/dev/null | sed -n 's/^NDK_VERSION=//p' | tail -1 || true)"
+          NDK_VERSION="${NDK_VERSION:-27.1.12297006}"
+          echo "Using NDK $NDK_VERSION"
+          echo "ndk_version=$NDK_VERSION" >> "$GITHUB_OUTPUT"
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_HOME}" -name sdkmanager -type f 2>/dev/null | head -1)"
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          yes | "$SDKMANAGER" "ndk;$NDK_VERSION" "cmake;3.22.1" > /dev/null
+
+      - name: Configure release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set — signing the release APK with the debug key."
+            exit 0
+          fi
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > mobile/android/release.keystore
+          cat > mobile/android/keystore.properties <<EOF
+          storeFile=release.keystore
+          storePassword=${ANDROID_KEYSTORE_PASSWORD}
+          keyAlias=${ANDROID_KEY_ALIAS}
+          keyPassword=${ANDROID_KEY_PASSWORD}
+          EOF
+
+      - name: Resolve release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
+          INPUT_TAG: ${{ github.event.inputs.tag || '' }}
+        run: |
+          set -euo pipefail
+          TAG="${RELEASE_TAG:-${INPUT_TAG:-}}"
+          if [ -z "$TAG" ]; then
+            PKG_VERSION="$(node -p "require('./mobile/package.json').version")"
+            TAG="v${PKG_VERSION}"
+          fi
+          VERSION_NAME="${TAG#v}"
+          {
+            echo "tag=$TAG"
+            echo "version_name=$VERSION_NAME"
+            echo "version_code=${GITHUB_RUN_NUMBER}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build release APK
+        working-directory: mobile/android
+        env:
+          CI: "true"
+          EXPO_NO_TELEMETRY: "1"
+        run: |
+          ./gradlew assembleRelease \
+            -PappVersionName="${{ steps.version.outputs.version_name }}" \
+            -PappVersionCode="${{ steps.version.outputs.version_code }}"
+
+      - name: Package APK
+        id: apk
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          SRC=mobile/android/app/build/outputs/apk/release/app-release.apk
+          NAME="Assina-Lote-${TAG}.apk"
+          mkdir -p artifacts
+          cp "$SRC" "artifacts/${NAME}"
+          (cd artifacts && sha256sum "${NAME}" > "${NAME}.sha256")
+          echo "path=artifacts/${NAME}" >> "$GITHUB_OUTPUT"
+          ls -lh artifacts
+
+      - name: Publish APK to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          APK: ${{ steps.apk.outputs.path }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --generate-notes --verify-tag || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" "$APK" "${APK}.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Assina-Lote-${{ steps.version.outputs.tag }}
+          path: artifacts/
+          if-no-files-found: error
